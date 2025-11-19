@@ -1,0 +1,16 @@
+# Ignore inputs and outputs
+02-inputs/
+03-outputs/
+
+# Python artifacts
+__pycache__/
+*.pyc
+.env
+.idea/
+.vscode/
+.DS_Store
+
+# Excel temp
+~$*.xlsx
+~$*.xlsm
+

@@ -1,0 +1,24 @@
+# Tool Registry - Single Source of Truth
+# Each tool entry:
+# - name: unique-id
+#   category: llms|ops|stt|tts|vision|web|data|io|...
+#   args_schema: {}          # optional JSON Schema-style summary
+#   side_effects: []         # e.g., ["fs:03-outputs/<tool>/..."]
+#   timeout_s: 600
+tools:
+  - name: payment-list
+    category: ops
+    summary: Generate AU/NZ payment workbooks with supplier lookup and DD-filterable pivots.
+    entrypoint: python 01-system/tools/ops/payment-list/payment_routine.py
+    args_schema: {}
+    side_effects:
+      - "fs:03-outputs/payment-list/"
+    timeout_s: 600
+  - name: concur-expense
+    category: ops
+    summary: Transform Concur expense extracts into SAP column I–N format with GST-aware tax codes.
+    entrypoint: python 01-system/tools/ops/concur-expense/convert_expenses.py
+    args_schema: {}
+    side_effects:
+      - "fs:03-outputs/concur-expense/"
+    timeout_s: 600
