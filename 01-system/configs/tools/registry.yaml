@@ -16,7 +16,7 @@ tools:
     timeout_s: 600
   - name: concur-expense
     category: ops
-    summary: Transform Concur expense extracts into SAP column I–N format with GST-aware tax codes.
+    summary: Transform Concur expense extracts into SAP column I-N format using W/AQ/AR (gross/GST/net) with AU/NZ GST rate checks.
     entrypoint: python 01-system/tools/ops/concur-expense/convert_expenses.py
     args_schema: {}
     side_effects:

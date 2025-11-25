@@ -158,14 +158,51 @@ def resolve_vendor_id(
     return fallback
 
 
-def determine_tax_code(hint: str, tax_amount: float) -> str:
+def determine_tax_code(hint: str, gst_amount: float) -> str:
     if hint in GST_HINT_TAXABLE or hint.startswith("Q2"):
         return "L1"
     if hint in GST_HINT_NONTAX or hint.startswith("Q0"):
         return "L0"
-    if abs(tax_amount) > 0.009:
+    if abs(gst_amount) > 0.009:
         return "L1"
     return "L0"
+
+
+def numeric_series(frame: pd.DataFrame, columns: list[str], default: float = 0.0) -> pd.Series:
+    """Return the first available column converted to float, or a default-filled series."""
+    for column in columns:
+        if column in frame.columns:
+            return pd.to_numeric(frame[column], errors="coerce").fillna(default)
+    return pd.Series(default, index=frame.index, dtype=float)
+
+
+def validate_gst_rates(df: pd.DataFrame, region: str) -> None:
+    """Ensure GST rates align with AU (10% or 0) and NZ (15% or 0)."""
+    if df.empty:
+        return
+    region_upper = region.upper()
+    expected_rate = {"AU": 0.10, "NZ": 0.15}.get(region_upper)
+    if expected_rate is None:
+        return
+    tolerance = 0.005
+    gst = df["gst_amount"].abs()
+    net = df["net_amount"].abs()
+    rate = pd.Series(0.0, index=df.index)
+    nonzero_net = net > 0.009
+    rate.loc[nonzero_net] = (gst.loc[nonzero_net] / net.loc[nonzero_net]).astype(float)
+    valid_zero = gst <= 0.009
+    valid_expected = (rate >= expected_rate - tolerance) & (rate <= expected_rate + tolerance)
+    invalid_mask = ~(valid_zero | valid_expected)
+    if invalid_mask.any():
+        sample = (
+            df.loc[invalid_mask, ["Employee ID", "Report ID", "Journal Amount", "gst_amount", "net_amount"]]
+            .head(5)
+        )
+        raise ValueError(
+            f"{region_upper}: GST rate must be 0 or {expected_rate:.0%}; found {invalid_mask.sum()} rows outside tolerance."
+            f"\nSample:\n{sample.to_string(index=False)}"
+        )
+
 
 def iter_region_files(region_dir: Path) -> Iterable[Path]:
     for path in sorted(region_dir.iterdir()):
@@ -195,13 +232,18 @@ def prepare_company_rows(
     comp["Department"] = comp["Department"].apply(format_cost_center)
     if cost_center_transform:
         comp["Department"] = comp["Department"].apply(cost_center_transform)
-    comp["gross_amount"] = pd.to_numeric(comp["Journal Amount"], errors="coerce").fillna(0.0)
-    comp["tax_amount"] = pd.to_numeric(comp["Report Entry Total Tax Posted Amount"], errors="coerce").fillna(0.0)
-    comp["net_amount"] = comp["gross_amount"] - comp["tax_amount"]
+    comp["gross_amount"] = numeric_series(comp, ["Journal Amount"])
+    comp["gst_amount"] = numeric_series(
+        comp,
+        ["Report Entry Total Tax Posted Amount"],
+    )
+    comp["net_amount"] = numeric_series(comp, ["Net Tax Amount"])
+    if "Net Tax Amount" not in comp.columns:
+        comp["net_amount"] = comp["gross_amount"] - comp["gst_amount"]
     hints = comp.get("Report Entry Tax Code", pd.Series(dtype=str)).fillna("").astype(str).str.upper().str.strip()
     comp["tax_code"] = [
-        determine_tax_code(hint, tax_amount)
-        for hint, tax_amount in zip(hints, comp["tax_amount"])
+        determine_tax_code(hint, gst_amount)
+        for hint, gst_amount in zip(hints, comp["gst_amount"])
     ]
     comp["normalized_account"] = comp["Journal Account Code"].apply(normalize_account)
     comp["display_account"] = comp["normalized_account"].apply(build_display_account)
@@ -228,7 +270,7 @@ def aggregate_rows(df: pd.DataFrame) -> pd.DataFrame:
             "sap_account",
             "gross_amount",
             "net_amount",
-            "tax_amount",
+            "gst_amount",
             "tax_code",
             "sap_amount"
         ])
@@ -247,14 +289,14 @@ def aggregate_rows(df: pd.DataFrame) -> pd.DataFrame:
         .agg({
             "gross_amount": "sum",
             "net_amount": "sum",
-            "tax_amount": "sum",
+            "gst_amount": "sum",
         })
         .reset_index()
     )
     agg["sap_amount"] = agg["gross_amount"].abs().round(2)
     agg["gross_amount"] = agg["gross_amount"].round(2)
     agg["net_amount"] = agg["net_amount"].round(2)
-    agg["tax_amount"] = agg["tax_amount"].round(2)
+    agg["gst_amount"] = agg["gst_amount"].round(2)
     agg = agg.sort_values(
         ["SAP Vendor ID", "Report ID", "Employee ID", "Report Submit Date", "Department", "display_account", "tax_code"]
     ).reset_index(drop=True)
@@ -281,13 +323,13 @@ def build_gst_check(agg: pd.DataFrame) -> pd.DataFrame:
         .agg({
             "gross_amount": "sum",
             "net_amount": "sum",
-            "tax_amount": "sum",
+            "gst_amount": "sum",
         })
         .reset_index()
     )
     recon["Gross Amount"] = recon["gross_amount"].abs().round(2)
     recon["Net Amount"] = recon["net_amount"].abs().round(2)
-    recon["GST Amount"] = recon["tax_amount"].abs().round(2)
+    recon["GST Amount"] = recon["gst_amount"].abs().round(2)
     recon["Calculated GST (Gross-Net)"] = (recon["Gross Amount"] - recon["Net Amount"]).round(2)
     recon["Difference"] = (recon["GST Amount"] - recon["Calculated GST (Gross-Net)"]).round(2)
     return recon[
@@ -352,6 +394,7 @@ def process_file(
 ) -> Path:
     raw_df = read_concur_file(path)
     comp = prepare_company_rows(raw_df.copy(), vendor_lookup, employee_lookup, cost_center_transform)
+    validate_gst_rates(comp, region)
     agg = aggregate_rows(comp)
     agg = apply_region_tax_display(agg, region)
     sap_view = build_sap_view(agg)
@@ -371,7 +414,7 @@ def process_file(
             "sap_account": "SAP GL",
             "gross_amount": "Journal Amount (Gross)",
             "net_amount": "Net Amount",
-            "tax_amount": "GST Amount",
+            "gst_amount": "GST Amount",
             "SAP Vendor ID": "SAP Supplier ID",
             "tax_code_display": "Tax Code",
         }).to_excel(writer, sheet_name="Summary", index=False)

@@ -1,5 +1,10 @@
 """
-Generate payment-list workbooks for each region under 02-inputs/downloads/<REGION>.
+Generate payment-list workbooks for each region under 02-inputs/Payment run raw/<REGION>.
+
+Vendor lookups default to the OneDrive workbook
+`OneDrive - novabio.onmicrosoft.com/Desktop/AZ Working Notes.xlsx`
+(AU AP sheet cols W:X, NZ AP sheet cols U:V). If unavailable, fall back to the
+local vendor files under 02-inputs/Payment run raw/.
 
 Steps for each raw workbook:
 1. Load the matching vendor list to map Vendor IDs to supplier names.
@@ -13,8 +18,10 @@ Usage:
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
+import tempfile
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -22,39 +29,110 @@ from openpyxl.utils import get_column_letter
 import win32com.client as win32
 
 BASE_DIR = Path(__file__).resolve().parents[4]
+ONEDRIVE_VENDOR_PATH = (
+    Path.home()
+    / "OneDrive - novabio.onmicrosoft.com"
+    / "Desktop"
+    / "AZ Working Notes.xlsx"
+)
+INPUT_ROOT = BASE_DIR / "02-inputs" / "Payment run raw"
 OUTPUT_ROOT = BASE_DIR / "03-outputs" / "payment-list"
 
 REGIONS = [
     {
         "code": "AU",
-        "data_dir": BASE_DIR / "02-inputs" / "downloads" / "AU",
-        "vendor_file": BASE_DIR / "02-inputs" / "downloads" / "AU Vendor list.xlsx",
+        "data_dir": INPUT_ROOT / "AU",
+        "vendor_sources": [
+            {
+                "path": ONEDRIVE_VENDOR_PATH,
+                "sheet": "AU AP",
+                "usecols": "W:X",
+                "copy_for_read": True,
+            },
+            {
+                "path": INPUT_ROOT / "AU Vendor list.xlsx",
+                "sheet": "Sheet3",
+                "usecols": [0, 1],
+            },
+        ],
     },
     {
         "code": "NZ",
-        "data_dir": BASE_DIR / "02-inputs" / "downloads" / "NZ",
-        "vendor_file": BASE_DIR / "02-inputs" / "downloads" / "NZ Vendor list.xlsx",
+        "data_dir": INPUT_ROOT / "NZ",
+        "vendor_sources": [
+            {
+                "path": ONEDRIVE_VENDOR_PATH,
+                "sheet": "NZ AP",
+                "usecols": "U:V",
+                "copy_for_read": True,
+            },
+            {
+                "path": INPUT_ROOT / "NZ Vendor list.xlsx",
+                "sheet": "Sheet3",
+                "usecols": [0, 1],
+            },
+        ],
     },
 ]
 
 
-def load_vendor_lookup(vendor_path: Path) -> dict[int, str]:
-    """Return {vendor_id: supplier_name} from the provided workbook."""
-    if not vendor_path.exists():
-        raise FileNotFoundError(f"Vendor list missing: {vendor_path}")
+def copy_with_winapi(src: Path, dst: Path) -> None:
+    """Use Windows API copy to avoid share/lock issues when reading vendor workbooks."""
+    result = ctypes.windll.kernel32.CopyFileW(str(src), str(dst), False)
+    if result == 0:
+        raise ctypes.WinError()
 
-    df = pd.read_excel(vendor_path, sheet_name="Sheet3", usecols=[0, 1])
-    df = df.dropna()
-    lookup: dict[int, str] = {}
-    for _, row in df.iterrows():
-        try:
-            vendor_id = int(row.iloc[0])
-        except (TypeError, ValueError):
+
+def load_vendor_lookup(vendor_sources: list[dict]) -> dict[int, str]:
+    """Return {vendor_id: supplier_name} using the first available vendor source."""
+    last_error: Exception | None = None
+    for source in vendor_sources:
+        path = Path(source["path"])
+        sheet = source.get("sheet")
+        usecols = source.get("usecols")
+        copy_for_read = bool(source.get("copy_for_read"))
+        if not path.exists():
+            print(f"[WARN] Vendor source missing: {path}")
             continue
-        name = str(row.iloc[1]).strip()
-        if name:
-            lookup[vendor_id] = name
-    return lookup
+
+        temp_path: Path | None = None
+        target_path = path
+        try:
+            if copy_for_read:
+                temp_file = tempfile.NamedTemporaryFile(
+                    suffix=path.suffix, delete=False
+                )
+                temp_path = Path(temp_file.name)
+                temp_file.close()
+                copy_with_winapi(path, temp_path)
+                target_path = temp_path
+
+            df = pd.read_excel(target_path, sheet_name=sheet, usecols=usecols)
+            df = df.dropna()
+            lookup: dict[int, str] = {}
+            for _, row in df.iterrows():
+                try:
+                    vendor_id = int(row.iloc[0])
+                except (TypeError, ValueError):
+                    continue
+                name = str(row.iloc[1]).strip()
+                if name:
+                    lookup[vendor_id] = name
+            if lookup:
+                print(f"[INFO] Vendor source loaded: {path}")
+                return lookup
+        except Exception as exc:  # pragma: no cover - defensive logging
+            last_error = exc
+            print(f"[WARN] Failed vendor source {path}: {exc}")
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
+    if last_error:
+        raise last_error
+    raise FileNotFoundError(
+        f"No vendor source available from: {[s['path'] for s in vendor_sources]}"
+    )
 
 
 def resolve_supplier(vendor_value, current_name, lookup: dict[int, str]) -> str:
@@ -186,17 +264,17 @@ def process_workbook(region_code: str, data_path: Path, lookup: dict[int, str]) 
     return output_path
 
 
-def process_region(region_config: dict[str, Path]) -> list[Path]:
+def process_region(region_config: dict[str, object]) -> list[Path]:
     """Process all XLSX files for a region; return list of generated paths."""
     region_code = region_config["code"]
     data_dir = region_config["data_dir"]
-    vendor_file = region_config["vendor_file"]
+    vendor_sources = region_config["vendor_sources"]
 
     if not data_dir.exists():
         print(f"[WARN] Data directory missing for {region_code}: {data_dir}")
         return []
 
-    lookup = load_vendor_lookup(vendor_file)
+    lookup = load_vendor_lookup(vendor_sources)
     generated_paths: list[Path] = []
     for workbook in sorted(data_dir.glob("*.xlsx")):
         print(f"[INFO] Generating payment list for {region_code}: {workbook.name}")

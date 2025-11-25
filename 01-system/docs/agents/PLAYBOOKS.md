@@ -9,10 +9,10 @@ Playbooks map short natural-language phrases to a repeatable series of steps and
 ## Payment list refresh (AU/NZ)
 - **Trigger phrases**: "generate AU payment list", "refresh NZ payments", "run regional payment routine"
 - **Intent**: Use the payment-list tool to convert AU & NZ raw SAP exports into pivot-ready workbooks with DD filters.
-- **Required inputs**: Latest `02-inputs/downloads/<REGION>/<date>.xlsx` files and maintained vendor list files (`AU Vendor list.xlsx`, `NZ Vendor list.xlsx`).
-- **Tool**: `payment-list` (ops) — entrypoint `python 01-system/tools/ops/payment-list/payment_routine.py`
+- **Required inputs**: Latest `02-inputs/Payment run raw/<REGION>/<date>.xlsx` files; vendor lookup from `C:\Users\Azhao.PIVOTAL\OneDrive - novabio.onmicrosoft.com\Desktop\AZ Working Notes.xlsx` (AU AP!W:X, NZ AP!U:V). Falls back to `02-inputs/Payment run raw/AU Vendor list.xlsx` or `NZ Vendor list.xlsx` if OneDrive is unavailable.
+- **Tool**: `payment-list` (ops) - entrypoint `python 01-system/tools/ops/payment-list/payment_routine.py`
 - **Steps**:
-  1. Ensure the new raw extracts and vendor lists are saved in `02-inputs/downloads/<REGION>/` and `02-inputs/downloads/` respectively.
+  1. Ensure new raw extracts are saved under `02-inputs/Payment run raw/<REGION>/` and OneDrive is synced (close the vendor workbook if locked).
   2. Run the payment-list tool from the repo root.
   3. Verify that AU/NZ workbooks were regenerated under `03-outputs/payment-list/<REGION>/`.
   4. Share the refreshed output paths and any notable totals with the requester.
@@ -20,12 +20,12 @@ Playbooks map short natural-language phrases to a repeatable series of steps and
 
 ## Concur expense SAP paste (AU)
 - **Trigger phrases**: "translate Concur expense file", "build SAP I-N columns", "refresh Concur AU expenses"
-- **Intent**: Convert the Concur Synchronized Accounting extract into SAP-ready I–N columns with GST-aware L0/L1 tax codes.
+- **Intent**: Convert the Concur Synchronized Accounting extract into SAP-ready I-N columns with GST-aware L0/L1 tax codes.
 - **Required inputs**: Latest extract `.xlsx` placed under `02-inputs/Concur/AU/` (files containing `Synchronized_Accounting_Extract`) plus any employee/vendor mapping already embedded in Concur.
 - **Tool**: `concur-expense` (ops) - entrypoint `python 01-system/tools/ops/concur-expense/convert_expenses.py`
 - **Steps**:
   1. Drop the newest Concur extract into `02-inputs/Concur/AU/` (leave `EXAMPLE` files untouched for reference).
   2. Run the concur-expense tool from the repo root.
   3. Review `Summary` sheet totals and confirm GST splits before sharing.
-  4. Provide the `SAP_Paste` sheet path (columns I–N) back to the requester for SAP entry.
+  4. Provide the `SAP_Paste` sheet path (columns I-N) back to the requester for SAP entry.
 - **Outputs**: `03-outputs/concur-expense/AU/SAP_AU_<source>.xlsx`
