@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 from typing import Iterable
 
 import pandas as pd
@@ -41,8 +41,6 @@ REGIONS = [
 ]
 
 SKIP_KEYWORDS = {"EXAMPLE", "~$"}
-GST_HINT_TAXABLE = {"Q2", "Q15"}
-GST_HINT_NONTAX = {"Q0"}
 
 def normalize_account(value) -> str:
     if pd.isna(value):
@@ -158,14 +156,36 @@ def resolve_vendor_id(
     return fallback
 
 
-def determine_tax_code(hint: str, gst_amount: float) -> str:
-    if hint in GST_HINT_TAXABLE or hint.startswith("Q2"):
-        return "L1"
-    if hint in GST_HINT_NONTAX or hint.startswith("Q0"):
-        return "L0"
+def determine_tax_code(gst_amount: float) -> str:
     if abs(gst_amount) > 0.009:
         return "L1"
     return "L0"
+
+
+def normalize_key_value(value) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.date().isoformat() if isinstance(value, datetime) else value.isoformat()
+    return str(value).strip().upper()
+
+
+def build_merge_key(row: pd.Series) -> tuple:
+    emp = normalize_key_value(row.get("Employee ID"))
+    report = normalize_key_value(row.get("Report ID"))
+    transaction_date = normalize_key_value(row.get("Report Entry Transaction Date"))
+    expense_type = normalize_key_value(row.get("Report Entry Expense Type Name"))
+    vendor_name = normalize_key_value(row.get("Report Entry Vendor Name"))
+    account = normalize_account(row.get("Journal Account Code")).upper()
+    if transaction_date and expense_type and vendor_name:
+        return ("KEY1", emp, report, transaction_date, expense_type, vendor_name, account)
+    if transaction_date:
+        return ("KEY2", emp, report, transaction_date, account)
+    return ("KEY3", emp, report, account)
+
+
+def format_merge_key(key: tuple) -> str:
+    return " | ".join(str(part) for part in key)
 
 
 def numeric_series(frame: pd.DataFrame, columns: list[str], default: float = 0.0) -> pd.Series:
@@ -174,6 +194,51 @@ def numeric_series(frame: pd.DataFrame, columns: list[str], default: float = 0.0
         if column in frame.columns:
             return pd.to_numeric(frame[column], errors="coerce").fillna(default)
     return pd.Series(default, index=frame.index, dtype=float)
+
+
+def merge_gst_lines(expense_df: pd.DataFrame, gst_df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
+    """Merge standalone GST lines (DR) back into expense lines (CR) using deterministic keys."""
+    expense_df = expense_df.copy()
+    expense_df["merge_key"] = expense_df.apply(build_merge_key, axis=1) if not expense_df.empty else pd.Series(dtype=object)
+    unmatched: list[dict] = []
+
+    gst_totals = {}
+    if gst_df is not None and not gst_df.empty:
+        gst_df = gst_df.copy()
+        gst_df["merge_key"] = gst_df.apply(build_merge_key, axis=1)
+        gst_df["gst_value"] = numeric_series(
+            gst_df,
+            ["Report Entry Total Tax Posted Amount", "Report Entry Tax Posted Amount"],
+        )
+        gst_totals = gst_df.groupby("merge_key")["gst_value"].sum()
+    else:
+        gst_df = pd.DataFrame()
+
+    for key, gst_total in gst_totals.items():
+        mask = expense_df["merge_key"] == key
+        if mask.any():
+            share_base = expense_df.loc[mask, "gross_amount"].abs()
+            total_share = share_base.sum()
+            if total_share <= 0:
+                allocation = pd.Series([1.0 / len(share_base)] * len(share_base), index=share_base.index)
+            else:
+                allocation = share_base / total_share
+            expense_df.loc[mask, "gst_amount"] = gst_total * allocation
+        else:
+            sample = gst_df.loc[gst_df["merge_key"] == key].iloc[0]
+            unmatched.append({
+                "Employee ID": sample.get("Employee ID", ""),
+                "Report ID": sample.get("Report ID", ""),
+                "Report Submit Date": sample.get("Report Submit Date", ""),
+                "Key": format_merge_key(key),
+                "GST Found": round(float(gst_total), 2),
+                "Expense Matched": 0,
+                "Action": "Unmatched GST line",
+            })
+            print(f"[WARN] GST line unmatched for key {format_merge_key(key)}: gst={gst_total:.2f}")
+
+    expense_df = expense_df.drop(columns=["merge_key"])
+    return expense_df, unmatched
 
 
 def validate_gst_rates(df: pd.DataFrame, region: str) -> None:
@@ -185,8 +250,8 @@ def validate_gst_rates(df: pd.DataFrame, region: str) -> None:
     if expected_rate is None:
         return
     tolerance = 0.005
-    gst = df["gst_amount"].abs()
-    net = df["net_amount"].abs()
+    gst = df["gst_amount"].astype(float).abs()
+    net = df["net_amount"].astype(float).abs()
     rate = pd.Series(0.0, index=df.index)
     nonzero_net = net > 0.009
     rate.loc[nonzero_net] = (gst.loc[nonzero_net] / net.loc[nonzero_net]).astype(float)
@@ -194,12 +259,11 @@ def validate_gst_rates(df: pd.DataFrame, region: str) -> None:
     valid_expected = (rate >= expected_rate - tolerance) & (rate <= expected_rate + tolerance)
     invalid_mask = ~(valid_zero | valid_expected)
     if invalid_mask.any():
-        sample = (
-            df.loc[invalid_mask, ["Employee ID", "Report ID", "Journal Amount", "gst_amount", "net_amount"]]
-            .head(5)
-        )
+        sample_cols = [col for col in ["Employee ID", "Report ID", "gross_amount", "gst_amount", "net_amount"] if col in df.columns]
+        sample = df.loc[invalid_mask, sample_cols].head(5)
         raise ValueError(
-            f"{region_upper}: GST rate must be 0 or {expected_rate:.0%}; found {invalid_mask.sum()} rows outside tolerance."
+            f"{region_upper}: GST rate check failed for {invalid_mask.sum()} of {len(df)} rows "
+            f"(expected {expected_rate:.1%} +/- {tolerance*100:.1f}%, or zero when GST is effectively 0)."
             f"\nSample:\n{sample.to_string(index=False)}"
         )
 
@@ -221,30 +285,27 @@ def prepare_company_rows(
     vendor_lookup: dict[str, str],
     employee_lookup: dict[str, str],
     cost_center_transform=None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[dict]]:
     payer = df.get("Journal Payer Payment Type Name", pd.Series(dtype=str)).fillna("").astype(str)
     payment_code = df.get("Report Entry Payment Code Name", pd.Series(dtype=str)).fillna("").astype(str)
     mask_company = payer.str.upper().eq("COMPANY")
     mask_cash = payment_code.str.upper().eq("CASH")
     comp = df.loc[mask_company & mask_cash].copy()
     comp = comp[comp["Journal Account Code"].notna()].copy()
-    comp["Report Submit Date"] = pd.to_datetime(comp["Report Submit Date"], errors="coerce").dt.date
+    comp["Report Submit Date"] = pd.to_datetime(comp["Report Submit Date"], errors="coerce", dayfirst=True).dt.date
+    comp["Report Entry Transaction Date"] = pd.to_datetime(
+        comp.get("Report Entry Transaction Date"), errors="coerce", dayfirst=True
+    ).dt.date
     comp["Department"] = comp["Department"].apply(format_cost_center)
     if cost_center_transform:
         comp["Department"] = comp["Department"].apply(cost_center_transform)
     comp["gross_amount"] = numeric_series(comp, ["Journal Amount"])
     comp["gst_amount"] = numeric_series(
         comp,
-        ["Report Entry Total Tax Posted Amount"],
+        ["Report Entry Total Tax Posted Amount", "Report Entry Tax Posted Amount"],
     )
-    comp["net_amount"] = numeric_series(comp, ["Net Tax Amount"])
-    if "Net Tax Amount" not in comp.columns:
-        comp["net_amount"] = comp["gross_amount"] - comp["gst_amount"]
-    hints = comp.get("Report Entry Tax Code", pd.Series(dtype=str)).fillna("").astype(str).str.upper().str.strip()
-    comp["tax_code"] = [
-        determine_tax_code(hint, gst_amount)
-        for hint, gst_amount in zip(hints, comp["gst_amount"])
-    ]
+    comp["Journal Debit Or Credit"] = comp.get("Journal Debit Or Credit", pd.Series(dtype=str)).fillna("").astype(str).str.upper().str.strip()
+    comp["Report Entry Tax Code"] = comp.get("Report Entry Tax Code", pd.Series(dtype=str)).fillna("").astype(str).str.upper().str.strip()
     comp["normalized_account"] = comp["Journal Account Code"].apply(normalize_account)
     comp["display_account"] = comp["normalized_account"].apply(build_display_account)
     comp["sap_account"] = comp["normalized_account"].apply(map_sap_account)
@@ -256,7 +317,14 @@ def prepare_company_rows(
             comp.get("Employee Last Name", ""),
         )
     ]
-    return comp
+    gst_mask = comp["Report Entry Tax Code"].eq("GST") & comp["Journal Debit Or Credit"].eq("DR")
+    expense_mask = comp["Journal Debit Or Credit"].eq("CR") & ~comp["Report Entry Tax Code"].eq("GST")
+    gst_lines = comp.loc[gst_mask].copy()
+    expense_lines = comp.loc[expense_mask].copy()
+    expense_lines, unmatched = merge_gst_lines(expense_lines, gst_lines)
+    expense_lines["net_amount"] = expense_lines["gross_amount"] - expense_lines["gst_amount"]
+    expense_lines["tax_code"] = expense_lines["gst_amount"].apply(determine_tax_code)
+    return expense_lines, unmatched
 
 def aggregate_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -288,15 +356,14 @@ def aggregate_rows(df: pd.DataFrame) -> pd.DataFrame:
         df.groupby(group_cols, dropna=False)
         .agg({
             "gross_amount": "sum",
-            "net_amount": "sum",
             "gst_amount": "sum",
         })
         .reset_index()
     )
-    agg["sap_amount"] = agg["gross_amount"].abs().round(2)
     agg["gross_amount"] = agg["gross_amount"].round(2)
-    agg["net_amount"] = agg["net_amount"].round(2)
     agg["gst_amount"] = agg["gst_amount"].round(2)
+    agg["net_amount"] = (agg["gross_amount"] - agg["gst_amount"]).round(2)
+    agg["sap_amount"] = agg["gross_amount"].abs().round(2)
     agg = agg.sort_values(
         ["SAP Vendor ID", "Report ID", "Employee ID", "Report Submit Date", "Department", "display_account", "tax_code"]
     ).reset_index(drop=True)
@@ -314,37 +381,75 @@ def apply_region_tax_display(agg: pd.DataFrame, region: str) -> pd.DataFrame:
         agg["tax_code_display"] = agg["tax_code"]
     return agg
 
-def build_gst_check(agg: pd.DataFrame) -> pd.DataFrame:
-    if agg.empty:
-        return pd.DataFrame()
-    group_cols = ["Employee ID", "SAP Vendor ID", "Report ID", "Report Submit Date"]
-    recon = (
-        agg.groupby(group_cols, dropna=False)
-        .agg({
-            "gross_amount": "sum",
-            "net_amount": "sum",
-            "gst_amount": "sum",
-        })
-        .reset_index()
-    )
-    recon["Gross Amount"] = recon["gross_amount"].abs().round(2)
-    recon["Net Amount"] = recon["net_amount"].abs().round(2)
-    recon["GST Amount"] = recon["gst_amount"].abs().round(2)
-    recon["Calculated GST (Gross-Net)"] = (recon["Gross Amount"] - recon["Net Amount"]).round(2)
-    recon["Difference"] = (recon["GST Amount"] - recon["Calculated GST (Gross-Net)"]).round(2)
-    return recon[
-        [
-            "Employee ID",
-            "SAP Vendor ID",
-            "Report ID",
-            "Report Submit Date",
-            "Gross Amount",
-            "Net Amount",
-            "GST Amount",
-            "Calculated GST (Gross-Net)",
-            "Difference",
-        ]
+def build_gst_check(agg: pd.DataFrame, unmatched: list[dict] | None = None) -> pd.DataFrame:
+    unmatched = unmatched or []
+    base_columns = [
+        "Employee ID",
+        "SAP Vendor ID",
+        "Report ID",
+        "Report Submit Date",
+        "Gross Amount",
+        "Net Amount",
+        "GST Amount",
+        "Calculated GST (Gross-Net)",
+        "Difference",
+        "Status",
+        "Key",
+        "GST Found",
+        "Expense Matched",
+        "Action",
     ]
+    frames: list[pd.DataFrame] = []
+
+    if not agg.empty:
+        group_cols = ["Employee ID", "SAP Vendor ID", "Report ID", "Report Submit Date"]
+        recon = (
+            agg.groupby(group_cols, dropna=False)
+            .agg({
+                "gross_amount": "sum",
+                "net_amount": "sum",
+                "gst_amount": "sum",
+            })
+            .reset_index()
+        )
+        recon["Gross Amount"] = recon["gross_amount"].abs().round(2)
+        recon["Net Amount"] = recon["net_amount"].abs().round(2)
+        recon["GST Amount"] = recon["gst_amount"].abs().round(2)
+        recon["Calculated GST (Gross-Net)"] = (recon["Gross Amount"] - recon["Net Amount"]).round(2)
+        recon["Difference"] = (recon["GST Amount"] - recon["Calculated GST (Gross-Net)"]).round(2)
+        recon["Status"] = recon["Difference"].abs().lt(0.01).map({True: "OK", False: "CHECK"})
+        recon["Key"] = ""
+        recon["GST Found"] = ""
+        recon["Expense Matched"] = ""
+        recon["Action"] = ""
+        frames.append(recon[base_columns])
+
+    if unmatched:
+        diag_rows = []
+        for item in unmatched:
+            diag_rows.append({
+                "Employee ID": item.get("Employee ID", ""),
+                "SAP Vendor ID": "",
+                "Report ID": item.get("Report ID", ""),
+                "Report Submit Date": item.get("Report Submit Date", ""),
+                "Gross Amount": "",
+                "Net Amount": "",
+                "GST Amount": item.get("GST Found", ""),
+                "Calculated GST (Gross-Net)": "",
+                "Difference": "",
+                "Status": "CHECK",
+                "Key": item.get("Key", ""),
+                "GST Found": item.get("GST Found", ""),
+                "Expense Matched": item.get("Expense Matched", ""),
+                "Action": item.get("Action", "Unmatched GST line"),
+            })
+        frames.append(pd.DataFrame(diag_rows))
+
+    if not frames:
+        return pd.DataFrame(columns=base_columns)
+
+    recon_full = pd.concat(frames, ignore_index=True)
+    return recon_full[base_columns]
 
 def build_sap_view(agg: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -391,14 +496,14 @@ def process_file(
     vendor_lookup: dict[str, str],
     employee_lookup: dict[str, str],
     cost_center_transform=None,
-) -> Path:
+) -> tuple[Path, pd.DataFrame]:
     raw_df = read_concur_file(path)
-    comp = prepare_company_rows(raw_df.copy(), vendor_lookup, employee_lookup, cost_center_transform)
+    comp, unmatched_gst = prepare_company_rows(raw_df.copy(), vendor_lookup, employee_lookup, cost_center_transform)
     validate_gst_rates(comp, region)
     agg = aggregate_rows(comp)
     agg = apply_region_tax_display(agg, region)
     sap_view = build_sap_view(agg)
-    gst_check = build_gst_check(agg)
+    gst_check = build_gst_check(agg, unmatched_gst)
     output_dir = OUTPUT_ROOT / region
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"SAP_{region}_{path.stem}.xlsx"

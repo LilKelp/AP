@@ -34,9 +34,11 @@
 |  +- docs/
 |  |  +- agents/{PLAYBOOKS.md, TOOLS.md, TROUBLESHOOTING.md, SYSTEM_MEMORY.md, STATE.md, BOOTSTRAP.md, memory/YYYY-MM.md}
 |  |  +- prompts/{README.md, INDEX.md, examples/prompt-template.md, prompt-*.md, collections/...}
-|  |  +- user/{README.md, INDEX.md, tools/...}
-|  +- tools/{ops/, llms/, stt/, _categories-README.md}
+|  |  +- user/{README.md, INDEX.md, tools/{concur-expense.md, payment-list.md, ...}}
+|  +- tools/{ops/{concur-expense/, payment-list/}, llms/, stt/, _categories-README.md}
 +- 02-inputs/{downloads/}
+- 02-inputs/Concur/{AU/, NZ/, ...}
+- 02-inputs/Payment run raw/{AU Vendor list.xlsx, NZ Vendor list.xlsx}
 +- 03-outputs/{README.md, <tool>/}
 ```
 
