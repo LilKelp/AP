@@ -28,4 +28,5 @@ Playbooks map short natural-language phrases to a repeatable series of steps and
   2. Run the concur-expense tool from the repo root.
   3. Review `Summary` sheet totals and confirm GST splits before sharing.
   4. Provide the `SAP_Paste` sheet path (columns I-N) back to the requester for SAP entry.
+- **Notes**: Mixed GST lines are auto-detected (GST materially below full rate) and split into taxable/non-taxable SAP lines without manual flags; GST_Check shows the derived split.
 - **Outputs**: `03-outputs/concur-expense/AU/SAP_AU_<source>.xlsx`
