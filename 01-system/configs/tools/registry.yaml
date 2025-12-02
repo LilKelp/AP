@@ -22,3 +22,11 @@ tools:
     side_effects:
       - "fs:03-outputs/concur-expense/"
     timeout_s: 600
+  - name: cross-charge
+    category: ops
+    summary: Extract travel invoice fields from PDFs into a consolidated Excel cross-charge list.
+    entrypoint: python 01-system/tools/ops/cross-charge/cross_charge.py
+    args_schema: {}
+    side_effects:
+      - "fs:03-outputs/cross charge list/"
+    timeout_s: 600
