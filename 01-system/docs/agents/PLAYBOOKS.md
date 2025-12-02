@@ -30,3 +30,14 @@ Playbooks map short natural-language phrases to a repeatable series of steps and
   4. Provide the `SAP_Paste` sheet path (columns I-N) back to the requester for SAP entry.
 - **Notes**: Mixed GST lines are auto-detected (GST materially below full rate) and split into taxable/non-taxable SAP lines without manual flags; GST_Check shows the derived split.
 - **Outputs**: `03-outputs/concur-expense/AU/SAP_AU_<source>.xlsx`
+
+## Travel cross-charge invoices
+- **Trigger phrases**: "build cross charge list", "extract travel invoices", "travel invoice cross-charge"
+- **Intent**: Parse travel invoice PDFs and consolidate key fields into an Excel cross-charge workbook.
+- **Required inputs**: PDF invoices placed under `02-inputs/Cross charge list/` (falls back to `02-inputs/invoices/`).
+- **Tool**: `cross-charge` (ops) - entrypoint `python 01-system/tools/ops/cross-charge/cross_charge.py`
+- **Steps**:
+  1. Drop all travel invoice PDFs into the input folder.
+  2. Run the cross-charge tool from repo root.
+  3. Review the Excel output for missing fields and totals.
+- **Outputs**: `03-outputs/cross charge list/travel_cross_charge.xlsx`
