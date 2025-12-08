@@ -41,3 +41,14 @@ Playbooks map short natural-language phrases to a repeatable series of steps and
   2. Run the cross-charge tool from repo root.
   3. Review the Excel output for missing fields and totals.
 - **Outputs**: `03-outputs/cross charge list/travel_cross_charge.xlsx`
+
+## SAP FBL1N export (open items)
+- **Trigger phrases**: "run FBL1N", "download vendor open items", "pull AU/NZ FBL1N"
+- **Intent**: Export FBL1N open items for AU (8000) and NZ (8100) to the downloads folder.
+- **Required inputs**: SAP GUI scripting enabled; SAP Logon entry name; user/password; key date (dd/MM/yyyy).
+- **Tool**: `sap-fbl1n` (ops) - entrypoint `powershell -ExecutionPolicy Bypass -File 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.ps1`
+- **Steps**:
+  1. Run the script with your SAP Logon entry, user, and key date; enter password when prompted.
+  2. Script runs FBL1N for company codes 8000 and 8100 (open items), applies key date, and exports ALV to Excel.
+  3. Files overwrite in `02-inputs/downloads/` as `FBL1N_<bukrs>_<yyyymmdd>.xlsx`.
+- **Outputs**: `02-inputs/downloads/FBL1N_8000_<yyyymmdd>.xlsx`; `02-inputs/downloads/FBL1N_8100_<yyyymmdd>.xlsx`

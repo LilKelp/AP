@@ -30,3 +30,11 @@ tools:
     side_effects:
       - "fs:03-outputs/cross charge list/"
     timeout_s: 600
+  - name: sap-fbl1n
+    category: ops
+    summary: Export FBL1N vendor open items for specified company codes via SAP GUI scripting.
+    entrypoint: powershell -ExecutionPolicy Bypass -File 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.ps1
+    args_schema: {}
+    side_effects:
+      - "fs:02-inputs/downloads/"
+    timeout_s: 1200
