@@ -8,8 +8,8 @@ Playbooks map short natural-language phrases to a repeatable series of steps and
 
 ## Payment list refresh (AU/NZ)
 - **Trigger phrases**: "generate AU payment list", "refresh NZ payments", "run regional payment routine"
-- **Intent**: Use the payment-list tool to convert AU & NZ raw SAP exports into pivot-ready workbooks with DD filters.
-- **Required inputs**: Latest `02-inputs/Payment run raw/<REGION>/<date>.xlsx` files; vendor lookup from `C:\Users\Azhao.PIVOTAL\OneDrive - novabio.onmicrosoft.com\Desktop\AZ Working Notes.xlsx` (AU AP!W:X, NZ AP!U:V). Falls back to `02-inputs/Payment run raw/AU Vendor list.xlsx` or `NZ Vendor list.xlsx` if OneDrive is unavailable.
+- **Intent**: Use the payment-list tool to convert AU & NZ raw SAP exports into pivot-ready workbooks with DD screening.
+- **Required inputs**: Latest `02-inputs/Payment run raw/<REGION>/<date>.xlsx` or `.xls` SAP ALV exports (text-list local-file saves are OK); vendor lookup from `C:\Users\Azhao.PIVOTAL\OneDrive - novabio.onmicrosoft.com\Desktop\AZ Working Notes.xlsx` (AU AP!W:X, NZ AP!U:V). Falls back to `02-inputs/Payment run raw/AU Vendor list.xlsx` or `NZ Vendor list.xlsx` if OneDrive is unavailable.
 - **Tool**: `payment-list` (ops) - entrypoint `python 01-system/tools/ops/payment-list/payment_routine.py`
 - **Steps**:
   1. Ensure new raw extracts are saved under `02-inputs/Payment run raw/<REGION>/` and OneDrive is synced (close the vendor workbook if locked).
@@ -42,13 +42,26 @@ Playbooks map short natural-language phrases to a repeatable series of steps and
   3. Review the Excel output for missing fields and totals.
 - **Outputs**: `03-outputs/cross charge list/travel_cross_charge.xlsx`
 
+## SAP GUI login (session)
+- **Trigger phrases**: "login SAP", "connect SAP", "open SAP session"
+- **Intent**: Ensure a SAP GUI session is logged in and ready for scripted automation (FBL1N exports, etc.).
+- **Required inputs**: SAP GUI installed + scripting enabled; SAP Logon entry name; client/user; authentication via SSO or a locally stored password (never share in chat).
+- **Tool**: `sap-login` (ops) - entrypoint `python 01-system/tools/ops/sap-login/sap_login.py`
+- **Steps**:
+  1. Ensure SAP GUI scripting is enabled (client + server).
+  2. Run the sap-login tool (defaults to `01-system/configs/apis/API-Keys.md` for SAP_LOGON_ENTRY/SAP_CLIENT/SAP_USER/SAP_PASSWORD).
+  3. Confirm success and proceed to downstream SAP-automation tools.
+- **Outputs**: `03-outputs/sap-login/latest.json`
+
 ## SAP FBL1N export (open items)
 - **Trigger phrases**: "run FBL1N", "download vendor open items", "pull AU/NZ FBL1N"
-- **Intent**: Export FBL1N open items for AU (8000) and NZ (8100) to the downloads folder.
-- **Required inputs**: SAP GUI scripting enabled; SAP Logon entry name; user/password; key date (dd/MM/yyyy).
-- **Tool**: `sap-fbl1n` (ops) - entrypoint `powershell -ExecutionPolicy Bypass -File 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.ps1`
+- **Intent**: Export FBL1N open items for AU (8000) and NZ (8100) directly into `02-inputs/Payment run raw/<REGION>/` for payment-list runs (local-file default with spreadsheet fallback).
+- **Required inputs**: SAP GUI scripting enabled; an active logged-in SAP GUI session; key date (dd/MM/yyyy).
+- **Tool**: `sap-fbl1n` (ops) - entrypoint `cscript //Nologo 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.vbs`
 - **Steps**:
-  1. Run the script with your SAP Logon entry, user, and key date; enter password when prompted.
-  2. Script runs FBL1N for company codes 8000 and 8100 (open items), applies key date, and exports ALV to Excel.
-  3. Files overwrite in `02-inputs/downloads/` as `FBL1N_<bukrs>_<yyyymmdd>.xlsx`.
-- **Outputs**: `02-inputs/downloads/FBL1N_8000_<yyyymmdd>.xlsx`; `02-inputs/downloads/FBL1N_8100_<yyyymmdd>.xlsx`
+  1. Ensure SAP is logged in (run `sap-login` first if needed).
+  2. Run VBScript local-file mode per code (recommended for payment-list input):
+     - AU: `cscript //Nologo 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.vbs 8000 <dd/MM/yyyy> "02-inputs/Payment run raw" mode=localfile`
+     - NZ: `cscript //Nologo 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.vbs 8100 <dd/MM/yyyy> "02-inputs/Payment run raw" mode=localfile`
+  3. If local-file mode fails, rerun with `mode=spreadsheet` (exports `FBL1N_<bukrs>_<yyyymmdd>.xlsx`) and point `OutputDir` to `02-inputs/downloads` or `02-inputs/Payment run raw`.
+- **Outputs**: `02-inputs/Payment run raw/<REGION>/<dd.MM.yy>.xls` (localfile) and `02-inputs/<dir>/FBL1N_<bukrs>_<yyyymmdd>.xlsx` (spreadsheet)

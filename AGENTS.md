@@ -35,12 +35,12 @@
 |  |  +- agents/{PLAYBOOKS.md, TOOLS.md, TROUBLESHOOTING.md, SYSTEM_MEMORY.md, STATE.md, BOOTSTRAP.md, memory/YYYY-MM.md}
 |  |  +- prompts/{README.md, INDEX.md, examples/prompt-template.md, prompt-*.md, collections/...}
 |  |  +- user/{README.md, INDEX.md, tools/{concur-expense.md, payment-list.md, cross-charge.md, ...}}
-|  +- tools/{ops/{concur-expense/, payment-list/, cross-charge/}, llms/, stt/, _categories-README.md}
+|  +- tools/{ops/{concur-expense/, payment-list/, cross-charge/, sap-fbl1n/, sap-login/}, llms/, stt/, _categories-README.md}
 +- 02-inputs/{downloads/}
 +- 02-inputs/Concur/{AU/, NZ/, ...}
 +- 02-inputs/Cross charge list/
 +- 02-inputs/Payment run raw/{AU Vendor list.xlsx, NZ Vendor list.xlsx}
-+- 03-outputs/{README.md, payment-list/, concur-expense/, cross charge list/, <tool>/}
++- 03-outputs/{README.md, payment-list/, concur-expense/, cross charge list/, sap-login/, <tool>/}
 ```
 
 ### Outputs (Single Source)

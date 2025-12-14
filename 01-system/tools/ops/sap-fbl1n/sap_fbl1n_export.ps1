@@ -1,6 +1,10 @@
 <#
 SAP FBL1N export helper (SAP GUI scripting).
 
+Deprecated:
+- The registered `sap-fbl1n` tool entrypoint now uses `01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.vbs` (VBScript local-file default + spreadsheet fallback).
+- This PowerShell script remains for reference/debug only.
+
 Usage (example):
   powershell -ExecutionPolicy Bypass -File 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.ps1 `
     -SapLogonEntry "ECP(1)" -Client "800" -User "azhao" `
@@ -90,7 +94,8 @@ function Export-Fbl1n {
     )
 
     $dateFormatted = $KeyDateObj.ToString("dd.MM.yyyy")
-    $outfile = Join-Path -Path $OutputDir -ChildPath ("{0}.xlsx" -f $KeyDateObj.ToString("dd.MM.yy"))
+    $dateStamp = $KeyDateObj.ToString("yyyyMMdd")
+    $outfile = Join-Path -Path $OutputDir -ChildPath ("FBL1N_{0}_{1}.xlsx" -f $CompanyCode, $dateStamp)
 
     # Go to FBL1N
     $Session.findById("wnd[0]/tbar[0]/okcd").text = "/nfbl1n"

@@ -5,4 +5,5 @@
 - Payment list routine: instructions in docs/user/tools/payment-list.md.
 - Concur expense converter: instructions in docs/user/tools/concur-expense.md.
 - Travel cross-charge extractor: instructions in docs/user/tools/cross-charge.md.
+- SAP login helper: instructions in docs/user/tools/sap-login.md.
 - SAP FBL1N export: instructions in docs/user/tools/sap-fbl1n.md.

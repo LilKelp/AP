@@ -1,5 +1,6 @@
 """
-Generate payment-list workbooks for each region under 02-inputs/Payment run raw/<REGION>.
+Generate payment-list workbooks for each region under 02-inputs/Payment run raw/<REGION>
+from SAP ALV exports (.xlsx or .xls).
 
 Vendor lookups default to the OneDrive workbook
 `OneDrive - novabio.onmicrosoft.com/Desktop/AZ Working Notes.xlsx`
@@ -19,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import ctypes
+import re
 import sys
 from pathlib import Path
 import tempfile
@@ -74,6 +76,245 @@ REGIONS = [
         ],
     },
 ]
+
+
+REQUIRED_COLUMNS = {
+    "Vendor",
+    "Reference",
+    "DD",
+    "Amount in local cur.",
+}
+
+
+def normalize_header_cell(value: object) -> str:
+    text = str(value).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text.lower()
+
+
+def find_header_row(preview: pd.DataFrame) -> int:
+    """Find the first row that looks like the SAP export header."""
+    header_synonyms = {
+        "vendor": {"vendor"},
+        "reference": {"reference", "inv. ref.", "inv ref"},
+        "dd": {"dd", "net due dt", "due date"},
+        "amount": {
+            "amount in local cur.",
+            "amount in local cur",
+            "amount in local currency",
+            "lc amnt",
+        },
+    }
+    for idx, row in preview.iterrows():
+        cells = {
+            normalize_header_cell(v)
+            for v in row.values.tolist()
+            if pd.notna(v)
+        }
+        if "vendor" not in cells:
+            continue
+        matches = sum(1 for synonyms in header_synonyms.values() if cells & synonyms)
+        if matches >= 2:
+            return int(idx)
+    return 0
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip/rename SAP columns to the canonical names used by the pivot."""
+    cleaned = []
+    for col in df.columns:
+        name = str(col).strip() if col is not None else ""
+        name = re.sub(r"\s+", " ", name)
+        cleaned.append(name)
+    df.columns = cleaned
+
+    rename_map: dict[str, str] = {}
+    for col in df.columns:
+        key = normalize_header_cell(col)
+        if key in {"dd", "net due dt", "due date"}:
+            rename_map[col] = "DD"
+        elif key in {
+            "amount in local cur.",
+            "amount in local cur",
+            "amount in local currency",
+            "lc amnt",
+        }:
+            rename_map[col] = "Amount in local cur."
+        elif key in {"inv. ref.", "inv ref"} and "Reference" not in df.columns:
+            rename_map[col] = "Reference"
+        elif key == "vendor":
+            rename_map[col] = "Vendor"
+        elif key == "reference":
+            rename_map[col] = "Reference"
+
+    df = df.rename(columns=rename_map)
+    df = df.loc[
+        :,
+        [
+            c
+            for c in df.columns
+            if c and not normalize_header_cell(c).startswith("unnamed")
+        ],
+    ]
+    df = coalesce_duplicate_columns(
+        df,
+        "DD",
+        invalid_values={"dd", " dd", "DD", " DD", ""},
+    )
+    df = coalesce_duplicate_columns(df, "Reference")
+    df = coalesce_duplicate_columns(df, "Amount in local cur.")
+    return df
+
+
+def coalesce_duplicate_columns(
+    df: pd.DataFrame, base_name: str, invalid_values: set[str] | None = None
+) -> pd.DataFrame:
+    """Collapse duplicate columns like DD/DD.1 into a single base_name column."""
+    positions = [
+        i
+        for i, col in enumerate(df.columns)
+        if col == base_name or str(col).startswith(f"{base_name}.")
+    ]
+    if len(positions) <= 1:
+        return df
+
+    best_pos = positions[0]
+    best_score = -1
+    for pos in positions:
+        series = df.iloc[:, pos]
+        score = int(series.notna().sum())
+        if invalid_values:
+            lowered = series.astype(str).str.lower().str.strip()
+            score -= int(lowered.isin(invalid_values).sum())
+        if score > best_score:
+            best_score = score
+            best_pos = pos
+
+    best_series = df.iloc[:, best_pos]
+    insert_at = min(positions)
+    df = df.drop(df.columns[positions], axis=1)
+    df.insert(insert_at, base_name, best_series)
+    return df
+
+
+def looks_like_ascii_export(preview: pd.DataFrame) -> bool:
+    """Detect SAP 'text list saved as .xls' exports (single column with | separators)."""
+    if preview.shape[1] != 1:
+        return False
+    col = preview.iloc[:, 0].dropna().astype(str)
+    return bool(col.str.contains(r"\|").any())
+
+
+def parse_ascii_export(lines: list[str]) -> pd.DataFrame:
+    """Parse a SAP text list export into a structured DataFrame."""
+    header_idx = None
+    for i, line in enumerate(lines):
+        lower = line.lower()
+        if "|" in line and "vendor" in lower and "reference" in lower:
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("Could not find header row in text-list export.")
+
+    header_line = lines[header_idx].strip()
+    columns = [c.strip() for c in header_line.strip("|").split("|")]
+    columns = [c for c in columns if c]
+
+    rows: list[list[str]] = []
+    for line in lines[header_idx + 1 :]:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if "vendor" in stripped.lower() and "reference" in stripped.lower():
+            continue
+        if set(stripped) <= {"-", "|"}:
+            continue
+        parts = [p.strip() for p in stripped.strip("|").split("|")]
+        if len(parts) < len(columns):
+            parts += [""] * (len(columns) - len(parts))
+        if len(parts) > len(columns):
+            parts = parts[: len(columns)]
+        rows.append(parts)
+
+    if not rows:
+        raise ValueError("No data rows found in text-list export.")
+    return pd.DataFrame(rows, columns=columns)
+
+
+def parse_amount_series(series: pd.Series) -> pd.Series:
+    """Convert SAP amount strings like '341,199.00-' to floats."""
+    def to_number(val):
+        if pd.isna(val):
+            return None
+        if isinstance(val, (int, float)):
+            return float(val)
+        text = str(val).strip().replace(",", "").replace(" ", "")
+        if not text:
+            return None
+        negative = text.endswith("-")
+        if negative:
+            text = text[:-1]
+        try:
+            num = float(text)
+        except ValueError:
+            return None
+        return -num if negative else num
+
+    return series.apply(to_number)
+
+
+def load_raw_dataframe(data_path: Path) -> pd.DataFrame:
+    """Load a SAP export (.xlsx or .xls) with header/column normalization."""
+    temp_path: Path | None = None
+    readable_path = data_path
+    if data_path.suffix.lower() == ".xls":
+        excel = win32.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        wb = excel.Workbooks.Open(str(data_path))
+        try:
+            tmp_file = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+            temp_path = Path(tmp_file.name)
+            tmp_file.close()
+            wb.SaveAs(str(temp_path), FileFormat=51)
+            readable_path = temp_path
+        finally:
+            wb.Close(SaveChanges=False)
+            excel.Quit()
+
+    try:
+        preview = pd.read_excel(readable_path, header=None, nrows=200)
+        if looks_like_ascii_export(preview):
+            raw_lines = (
+                pd.read_excel(readable_path, header=None)
+                .iloc[:, 0]
+                .dropna()
+                .astype(str)
+                .tolist()
+            )
+            df = parse_ascii_export(raw_lines)
+        else:
+            header_row = find_header_row(preview)
+            df = pd.read_excel(readable_path, header=header_row)
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+    df = normalize_columns(df)
+    df = df.dropna(how="all")
+    if "Vendor" in df.columns:
+        df = df[df["Vendor"].notna()]
+
+    missing = REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        raise ValueError(
+            "Raw export is missing required columns: "
+            + ", ".join(sorted(missing))
+            + ". Please include these fields in the SAP export."
+        )
+    df["Amount in local cur."] = parse_amount_series(df["Amount in local cur."])
+    df["DD"] = pd.to_datetime(df["DD"], dayfirst=True, errors="coerce")
+    return df
 
 
 def copy_with_winapi(src: Path, dst: Path) -> None:
@@ -251,7 +492,7 @@ def add_pivot_table(output_path: Path, last_row: int, last_col: int) -> None:
 
 def process_workbook(region_code: str, data_path: Path, lookup: dict[int, str]) -> Path:
     """Create the payment workbook for a single region/input file."""
-    df = pd.read_excel(data_path)
+    df = load_raw_dataframe(data_path)
     df = ensure_supplier_column(df, lookup)
 
     output_path = (
@@ -276,7 +517,13 @@ def process_region(region_config: dict[str, object]) -> list[Path]:
 
     lookup = load_vendor_lookup(vendor_sources)
     generated_paths: list[Path] = []
-    for workbook in sorted(data_dir.glob("*.xlsx")):
+    workbooks = [
+        *data_dir.glob("*.xlsx"),
+        *data_dir.glob("*.xls"),
+    ]
+    for workbook in sorted(
+        [w for w in workbooks if not w.name.startswith("~$")]
+    ):
         print(f"[INFO] Generating payment list for {region_code}: {workbook.name}")
         output_path = process_workbook(region_code, workbook, lookup)
         generated_paths.append(output_path)

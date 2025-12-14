@@ -8,7 +8,7 @@
 tools:
   - name: payment-list
     category: ops
-    summary: Generate AU/NZ payment workbooks with supplier lookup and DD-filterable pivots.
+    summary: Generate AU/NZ payment workbooks from SAP .xls/.xlsx exports (including text-list local-file saves) with supplier lookup and DD-filterable pivots.
     entrypoint: python 01-system/tools/ops/payment-list/payment_routine.py
     args_schema: {}
     side_effects:
@@ -32,9 +32,18 @@ tools:
     timeout_s: 600
   - name: sap-fbl1n
     category: ops
-    summary: Export FBL1N vendor open items for specified company codes via SAP GUI scripting.
-    entrypoint: powershell -ExecutionPolicy Bypass -File 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.ps1
+    summary: Export FBL1N vendor open items via SAP GUI scripting (VBScript local-file default with spreadsheet fallback).
+    entrypoint: cscript //Nologo 01-system/tools/ops/sap-fbl1n/sap_fbl1n_export.vbs
     args_schema: {}
     side_effects:
+      - "fs:02-inputs/Payment run raw/"
       - "fs:02-inputs/downloads/"
     timeout_s: 1200
+  - name: sap-login
+    category: ops
+    summary: Ensure a SAP GUI session is logged in (SAP GUI scripting) for downstream automated pipelines.
+    entrypoint: python 01-system/tools/ops/sap-login/sap_login.py
+    args_schema: {}
+    side_effects:
+      - "fs:03-outputs/sap-login/"
+    timeout_s: 300

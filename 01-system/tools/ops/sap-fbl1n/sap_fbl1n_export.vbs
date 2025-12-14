@@ -1,6 +1,6 @@
 ' SAP FBL1N Export Script (VBScript)
-' Version: 11.1 (Local File -> Clipboard)
-' Usage: cscript //Nologo sap_fbl1n_export.vbs <CompanyCode> <KeyDate> <OutputDir> [LayoutVariant] [dump] [radio=<id>]
+' Version: 13.0 (Local file or Spreadsheet save)
+' Usage: cscript //Nologo sap_fbl1n_export.vbs <CompanyCode> <KeyDate> <OutputDir> [LayoutVariant] [dump] [radio=<id>] [mode=localfile|spreadsheet]
 
 Option Explicit
 
@@ -8,12 +8,71 @@ Dim CompanyCode, KeyDate, OutputDir, LayoutVariant
 Dim SapGuiAuto, Application, Connection, Session
 Dim Grid, fso
 Dim RadioOverride
+Dim ExportMode
 
-WScript.Echo "Starting VBScript Version 11.0"
+' Map company code to subfolder (AU/NZ) for payment run raw saves
+Function GetRepoRoot()
+    Dim d
+    d = fso.GetParentFolderName(WScript.ScriptFullName) ' sap-fbl1n
+    d = fso.GetParentFolderName(d) ' ops
+    d = fso.GetParentFolderName(d) ' tools
+    d = fso.GetParentFolderName(d) ' 01-system
+    d = fso.GetParentFolderName(d) ' repo root
+    GetRepoRoot = d
+End Function
+
+Function IsAbsolutePath(p)
+    Dim t
+    t = Trim(p)
+    IsAbsolutePath = False
+    If t = "" Then Exit Function
+    If Left(t, 2) = "\\" Then
+        IsAbsolutePath = True
+        Exit Function
+    End If
+    If Len(t) >= 3 Then
+        If Mid(t, 2, 2) = ":\\" Then
+            IsAbsolutePath = True
+            Exit Function
+        End If
+    End If
+End Function
+
+Function ToAbsolutePath(p)
+    Dim t, root
+    t = Trim(p)
+    If IsAbsolutePath(t) Then
+        ToAbsolutePath = fso.GetAbsolutePathName(t)
+    Else
+        root = GetRepoRoot()
+        ToAbsolutePath = fso.GetAbsolutePathName(root & "\" & t)
+    End If
+End Function
+
+Function ResolveSaveDir(baseDir, companyCode)
+    Dim cc, target
+    cc = Trim(companyCode)
+    target = ToAbsolutePath(baseDir)
+    If Right(target, 1) = "\" Then
+        target = Left(target, Len(target) - 1)
+    End If
+    If LCase(Right(target, Len("payment run raw"))) = "payment run raw" Then
+        If cc = "8000" Then
+            target = target & "\AU"
+        ElseIf cc = "8100" Then
+            target = target & "\NZ"
+        Else
+            target = target & "\" & cc
+        End If
+    End If
+    ResolveSaveDir = target
+End Function
+
+WScript.Echo "Starting VBScript Version 13.0"
 
 ' Arguments
 If WScript.Arguments.Count < 3 Then
-    WScript.Echo "Usage: cscript sap_fbl1n_export.vbs <CompanyCode> <KeyDate> <OutputDir> [LayoutVariant] [dump]"
+    WScript.Echo "Usage: cscript sap_fbl1n_export.vbs <CompanyCode> <KeyDate> <OutputDir> [LayoutVariant] [dump] [radio=<id>] [mode=localfile|spreadsheet]"
     WScript.Quit 1
 End If
 
@@ -23,6 +82,7 @@ OutputDir = WScript.Arguments(2)
 
 LayoutVariant = ""
 RadioOverride = ""
+ExportMode = "localfile" ' default
 
 Dim DumpRadios
 DumpRadios = False
@@ -39,6 +99,8 @@ For idxArg = 3 To WScript.Arguments.Count - 1
         Else
             RadioOverride = Mid(argVal, 4)
         End If
+    ElseIf Left(argLower, 5) = "mode=" Then
+        ExportMode = LCase(Mid(argLower, 6))
     ElseIf LayoutVariant = "" Then
         LayoutVariant = argVal
     End If
@@ -163,62 +225,267 @@ If Grid Is Nothing Then
     WScript.Quit 1
 End If
 
-WScript.Echo "Grid found. Exporting to Clipboard..."
+WScript.Echo "Grid found. Ready to export..."
 
-' Trigger Local File Export: List -> Export -> Local File
-On Error Resume Next
-Session.findById("wnd[0]/mbar/menu[0]/menu[3]/menu[2]").select
-On Error Goto 0
-
-WScript.Sleep 1000
-
-' Select "In the clipboard" Format (robust selection with optional dump)
-If Not SelectClipboardRadio(Session, DumpRadios, RadioOverride) Then
-    WScript.Echo "Error: Could not select clipboard export option."
-    WScript.Quit 1
+' Trigger export
+If ExportMode <> "spreadsheet" And ExportMode <> "localfile" And ExportMode <> "file" Then
+    WScript.Echo "Warning: Unknown export mode '" & ExportMode & "'. Defaulting to localfile."
+    ExportMode = "localfile"
 End If
 
-' Handle "Information" dialog (Data copied to clipboard)
-WScript.Sleep 1000
-Dim i
-For i = 1 To 10
-    On Error Resume Next
-    If Session.ActiveWindow.Name = "wnd[1]" Then
-        WScript.Echo "Handling Info Dialog: " & Session.ActiveWindow.Text
-        Session.findById("wnd[1]/tbar[0]/btn[0]").press ' Continue (Green check)
-        Exit For
+If ExportMode = "spreadsheet" Then
+    WScript.Echo "Export mode: Spreadsheet -> Excel"
+    If Not ExportSpreadsheet(Session, OutputDir, CompanyCode, DateParts, DumpRadios, RadioOverride) Then
+        WScript.Echo "Error: Spreadsheet export failed."
+        WScript.Quit 1
     End If
-    On Error Goto 0
-    WScript.Sleep 500
-Next
+Else
+    WScript.Echo "Export mode: Local File -> Excel"
+    If Not ExportLocalFile(Session, OutputDir, CompanyCode, DateParts, DumpRadios, RadioOverride) Then
+        WScript.Echo "Warning: Local file export failed, falling back to Spreadsheet export."
+        If Not ExportSpreadsheet(Session, OutputDir, CompanyCode, DateParts, DumpRadios, RadioOverride) Then
+            WScript.Echo "Error: Spreadsheet export failed."
+            WScript.Quit 1
+        End If
+    End If
+End If
 
 WScript.Echo "SAP_EXPORT_DONE"
 WScript.Quit 0
 
 ' -------- Helpers --------
-Function SelectClipboardRadio(Session, DumpRadios, RadioOverride)
-    Dim dialog, idx, targetId, fallbackIds, fid, rb
-    SelectClipboardRadio = False
-    
-    ' Wait briefly for dialog to appear
-    For idx = 1 To 20
+Function ExportSpreadsheet(Session, OutputDir, CompanyCode, DateParts, DumpRadios, RadioOverride)
+    ExportSpreadsheet = False
+    Dim dateStamp, fileName, saveDir, dialogFound, idx
+    dateStamp = DateParts(2) & DateParts(1) & DateParts(0) ' yyyymmdd
+    fileName = "FBL1N_" & CompanyCode & "_" & dateStamp & ".xlsx"
+    saveDir = ResolveSaveDir(OutputDir, CompanyCode)
+
+    If Not fso.FolderExists(saveDir) Then
+        On Error Resume Next
+        fso.CreateFolder saveDir
+        On Error Goto 0
+    End If
+
+    On Error Resume Next
+    Session.findById("wnd[0]/mbar/menu[0]/menu[3]/menu[1]").select ' Spreadsheet
+    On Error Goto 0
+
+    ' Clear any immediate Information dialog (e.g., reminders) and continue
+    HandleInfoDialog Session
+
+    If Not SelectSpreadsheetRadio(Session, DumpRadios, RadioOverride) Then
+        WScript.Echo "Warning: Spreadsheet selection dialog not found; continuing with SendKeys fallback."
+    End If
+
+    ' Some systems show a Processing Mode dialog (Table vs Pivot); prefer Table
+    SelectProcessingMode Session
+
+    ' Wait for Save dialog and fill path/file (handle repeat info popups)
+    For idx = 1 To 60
         WScript.Sleep 250
         If Not Session.ActiveWindow Is Nothing Then
-            If Session.ActiveWindow.Name = "wnd[1]" Then Exit For
+            If Session.ActiveWindow.Name = "wnd[1]" Then
+                If InStr(LCase(Session.ActiveWindow.Text), "information") > 0 Then
+                    On Error Resume Next
+                    If Not Session.findById("wnd[1]/tbar[0]/btn[0]", False) Is Nothing Then
+                        Session.findById("wnd[1]/tbar[0]/btn[0]").press
+                    End If
+                    On Error GoTo 0
+                Else
+                    ' Save dialog
+                    If Not Session.findById("wnd[1]/usr/ctxtDY_PATH", False) Is Nothing Then
+                        Session.findById("wnd[1]/usr/ctxtDY_PATH").text = saveDir
+                    End If
+                    If Not Session.findById("wnd[1]/usr/ctxtDY_FILENAME", False) Is Nothing Then
+                        Session.findById("wnd[1]/usr/ctxtDY_FILENAME").text = fileName
+                    End If
+                    If Not Session.findById("wnd[1]/tbar[0]/btn[0]", False) Is Nothing Then
+                        Session.findById("wnd[1]/tbar[0]/btn[0]").press
+                        ExportSpreadsheet = True
+                        Exit Function
+                    End If
+                End If
+            End If
         End If
     Next
+
+    ' Fallback to Windows Save As via SendKeys when no SAP save dialog appears.
+    If TrySaveViaSendKeys(saveDir, fileName) Then
+        ExportSpreadsheet = True
+        Exit Function
+    End If
+End Function
+
+Function ExportLocalFile(Session, OutputDir, CompanyCode, DateParts, DumpRadios, RadioOverride)
+    ExportLocalFile = False
+    Dim fileName, saveDir, fullPathLocal, idx
+    fileName = DateParts(0) & "." & DateParts(1) & "." & Right(DateParts(2), 2) & ".xls"
+    saveDir = ResolveSaveDir(OutputDir, CompanyCode)
+
+    If Not fso.FolderExists(saveDir) Then
+        On Error Resume Next
+        fso.CreateFolder saveDir
+        On Error Goto 0
+    End If
+    fullPathLocal = fso.GetAbsolutePathName(saveDir) & "\" & fileName
+
+    On Error Resume Next
+    ' Local file... (F9) under List -> Export
+    Session.findById("wnd[0]/mbar/menu[0]/menu[3]/menu[2]").select
+    On Error Goto 0
+
+    ' If a format selection dialog appears first, try to pick Spreadsheet/Excel.
+    If Not Session.ActiveWindow Is Nothing Then
+        If Session.ActiveWindow.Name = "wnd[1]" Then
+            If Session.findById("wnd[1]/usr/ctxtDY_PATH", False) Is Nothing Then
+                Call SelectSpreadsheetRadio(Session, DumpRadios, RadioOverride)
+                SelectProcessingMode Session
+            End If
+        End If
+    End If
+
+    ' Wait for Save dialog and fill DY_PATH/DY_FILENAME
+    For idx = 1 To 80
+        WScript.Sleep 250
+        If Not Session.ActiveWindow Is Nothing Then
+            If Session.ActiveWindow.Name = "wnd[1]" Then
+                Dim lowerText
+                lowerText = LCase(Session.ActiveWindow.Text)
+                If InStr(lowerText, "information") > 0 Then
+                    On Error Resume Next
+                    If Not Session.findById("wnd[1]/tbar[0]/btn[0]", False) Is Nothing Then
+                        Session.findById("wnd[1]/tbar[0]/btn[0]").press
+                    End If
+                    On Error GoTo 0
+                ElseIf Not Session.findById("wnd[1]/usr/ctxtDY_PATH", False) Is Nothing Then
+                    Session.findById("wnd[1]/usr/ctxtDY_PATH").text = saveDir
+                    Session.findById("wnd[1]/usr/ctxtDY_FILENAME").text = fileName
+                    Session.findById("wnd[1]/tbar[0]/btn[0]").press
+                    WScript.Sleep 1000
+                    If LooksLikeAsciiList(fullPathLocal) Then
+                        WScript.Echo "Warning: Local file export produced a text list; will fall back to XXL export."
+                        Exit Function
+                    End If
+                    ExportLocalFile = True
+                    Exit Function
+                End If
+            End If
+        End If
+    Next
+
+    ' Fallback: some SAP setups open a Windows "Save As" dialog (not visible to SAP scripting).
+    If TrySaveViaSendKeys(saveDir, fileName) Then
+        If LooksLikeAsciiList(fullPathLocal) Then
+            WScript.Echo "Warning: Local file export produced a text list; will fall back to XXL export."
+        Else
+            ExportLocalFile = True
+            Exit Function
+        End If
+    End If
+
+    WScript.Echo "Error: Local file save dialog not found."
+End Function
+
+Function TrySaveViaSendKeys(saveDir, fileName)
+    TrySaveViaSendKeys = False
+    Dim sh, fullPath, i
+    Set sh = CreateObject("WScript.Shell")
+    fullPath = fso.GetAbsolutePathName(saveDir) & "\" & fileName
+
+    ' Try to bring the Save As dialog to foreground
+    If Not sh.AppActivate("Save As") Then
+        sh.AppActivate("Save list in file")
+    End If
+    WScript.Sleep 300
+
+    ' Try to select Excel file type, then type full path into filename field.
+    On Error Resume Next
+    sh.SendKeys "%t" ' Alt+T -> Save as type
+    WScript.Sleep 150
+    sh.SendKeys "e"  ' EXCEL Files (*.xls)
+    WScript.Sleep 150
+    sh.SendKeys "%n" ' Alt+N -> File name
+    WScript.Sleep 150
+    On Error GoTo 0
+
+    sh.SendKeys fullPath
+    sh.SendKeys "{ENTER}"
+
+    ' Give SAP/Windows a moment to write the file
+    For i = 1 To 20
+        WScript.Sleep 250
+        If fso.FileExists(fullPath) Then
+            TrySaveViaSendKeys = True
+            Exit Function
+        End If
+    Next
+End Function
+
+Function LooksLikeAsciiList(fullPath)
+    LooksLikeAsciiList = False
+    On Error Resume Next
+    Dim xl, wb, ws, colCount, r, val
+    Set xl = CreateObject("Excel.Application")
+    xl.Visible = False
+    xl.DisplayAlerts = False
+    Set wb = xl.Workbooks.Open(fullPath)
+    If Not wb Is Nothing Then
+        Set ws = wb.Worksheets(1)
+        colCount = ws.UsedRange.Columns.Count
+        If colCount = 1 Then
+            For r = 1 To 30
+                val = CStr(ws.Cells(r, 1).Value)
+                If InStr(val, "|") > 0 Then
+                    LooksLikeAsciiList = True
+                    Exit For
+                End If
+            Next
+        End If
+        wb.Close False
+    End If
+    xl.Quit
+    Set wb = Nothing
+    Set xl = Nothing
+    On Error GoTo 0
+End Function
+
+Function SelectSpreadsheetRadio(Session, DumpRadios, RadioOverride)
+    Dim dialog, idx, targetId, fallbackIds, fid, rb
+    SelectSpreadsheetRadio = False
+    
+    ' Wait for dialog (skip transient Information popups)
+    idx = 0
+    Do While idx < 30
+        idx = idx + 1
+        WScript.Sleep 250
+        If Not Session.ActiveWindow Is Nothing Then
+            If Session.ActiveWindow.Name = "wnd[1]" Then
+                Dim lowerText
+                lowerText = LCase(Session.ActiveWindow.Text)
+                If InStr(lowerText, "information") > 0 Or InStr(lowerText, "export list object") > 0 Then
+                    On Error Resume Next
+                    If Not Session.findById("wnd[1]/tbar[0]/btn[0]", False) Is Nothing Then
+                        Session.findById("wnd[1]/tbar[0]/btn[0]").press
+                    End If
+                    On Error GoTo 0
+                Else
+                    Exit Do
+                End If
+            End If
+        End If
+    Loop
     
     If Session.ActiveWindow Is Nothing Or Session.ActiveWindow.Name <> "wnd[1]" Then
         WScript.Echo "Error: Export dialog not found."
         Exit Function
     End If
-    
+
     Set dialog = Session.ActiveWindow
     WScript.Echo "Dialog: " & dialog.Text
-    
     If DumpRadios Then DumpControls dialog
-    
-    ' If user provided a radio ID, try it first (no further scanning on failure)
+
+    ' User override first
     If RadioOverride <> "" Then
         targetId = RadioOverride
         On Error Resume Next
@@ -227,23 +494,22 @@ Function SelectClipboardRadio(Session, DumpRadios, RadioOverride)
             rb.select
             If rb.selected = True Then
                 Session.findById("wnd[1]/tbar[0]/btn[0]").press
-                SelectClipboardRadio = True
+                SelectSpreadsheetRadio = True
                 Exit Function
             End If
         End If
         Err.Clear
         On Error GoTo 0
         WScript.Echo "Radio override failed: " & targetId
-        Exit Function ' do not continue scanning to avoid recursion errors; we can retry with dump output
+        Exit Function
     End If
-    
-    ' Try common radio IDs in order (underscore and no-underscore)
+
     fallbackIds = Array( _
-        "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[4,0]", _
-        "wnd[1]/usr/radRB_6", "wnd[1]/usr/radRB_5", "wnd[1]/usr/radRB_4", _
-        "wnd[1]/usr/radRB_3", "wnd[1]/usr/radRB_2", "wnd[1]/usr/radRB_1", "wnd[1]/usr/radRB_0", _
-        "wnd[1]/usr/radRB6", "wnd[1]/usr/radRB5", "wnd[1]/usr/radRB4", "wnd[1]/usr/radRB3", "wnd[1]/usr/radRB2", "wnd[1]/usr/radRB1", "wnd[1]/usr/radRB0" _
+        "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[0,0]", _
+        "wnd[1]/usr/radRB_0", "wnd[1]/usr/radRB0", _
+        "wnd[1]/usr/radRB_1", "wnd[1]/usr/radRB1" _
     )
+
     For Each fid In fallbackIds
         On Error Resume Next
         Set rb = Session.findById(fid, False)
@@ -251,16 +517,90 @@ Function SelectClipboardRadio(Session, DumpRadios, RadioOverride)
             rb.select
             If rb.selected = True Then
                 Session.findById("wnd[1]/tbar[0]/btn[0]").press
-                SelectClipboardRadio = True
+                SelectSpreadsheetRadio = True
                 Exit Function
             End If
         End If
         Err.Clear
         On Error GoTo 0
     Next
-    
-    WScript.Echo "Error: No radio button selected via fallback IDs."
+
+    ' Fallback to "OK" if no radio found
+    If Session.findById("wnd[1]/tbar[0]/btn[0]", False) Is Nothing Then
+        WScript.Echo "Error: No radio button selected via fallback IDs."
+    Else
+        Session.findById("wnd[1]/tbar[0]/btn[0]").press
+        SelectSpreadsheetRadio = True
+    End If
 End Function
+
+Sub HandleInfoDialog(Session)
+    Dim i
+    For i = 1 To 5
+        If Session.ActiveWindow Is Nothing Then Exit For
+        If Session.ActiveWindow.Name = "wnd[1]" Then
+            On Error Resume Next
+            WScript.Echo "Info dialog: " & Session.ActiveWindow.Text
+            If Not Session.findById("wnd[1]/tbar[0]/btn[0]", False) Is Nothing Then
+                Session.findById("wnd[1]/tbar[0]/btn[0]").press
+            End If
+            On Error GoTo 0
+        End If
+        WScript.Sleep 200
+    Next
+End Sub
+
+Sub SelectProcessingMode(Session)
+    ' Optional dialog after spreadsheet selection to choose Table vs Pivot
+    Dim idx, dialog, radios, rid, rb, picked
+    Set dialog = Nothing
+    For idx = 1 To 20
+        WScript.Sleep 200
+        If Session.ActiveWindow Is Nothing Then Exit For
+        If Session.ActiveWindow.Name = "wnd[1]" Then
+            Set dialog = Session.ActiveWindow
+            Exit For
+        End If
+    Next
+    If dialog Is Nothing Then Exit Sub
+    On Error Resume Next
+    radios = Array( _
+        "wnd[1]/usr/radRB_0", "wnd[1]/usr/radRB0", _
+        "wnd[1]/usr/radRB_1", "wnd[1]/usr/radRB1", _
+        "wnd[1]/usr/radSPOPLI-SELFLAG[0,0]" _
+    )
+    ' Prefer Table/Microsoft Excel, avoid pivot text if present
+    picked = False
+    For Each rid In radios
+        Set rb = Session.findById(rid, False)
+        If Not rb Is Nothing Then
+            Dim txt
+            txt = LCase(rb.Text)
+            If InStr(txt, "pivot") = 0 Then
+                If InStr(txt, "table") > 0 Or InStr(txt, "microsoft excel") > 0 Or InStr(txt, "excel") > 0 Then
+                    rb.select
+                    picked = True
+                    Exit For
+                End If
+            End If
+        End If
+    Next
+    ' If nothing matched, pick first available radio
+    If Not picked Then
+        For Each rid In radios
+            Set rb = Session.findById(rid, False)
+            If Not rb Is Nothing Then
+                rb.select
+                picked = True
+                Exit For
+            End If
+        Next
+    End If
+    If Not Session.findById("wnd[1]/tbar[0]/btn[0]", False) Is Nothing Then
+        Session.findById("wnd[1]/tbar[0]/btn[0]").press
+    End If
+    On Error GoTo 0
+End Sub
 
 Sub DumpRadioButtons(dialog)
     Dim stack(), stackSize, node, i
@@ -317,26 +657,28 @@ Sub DumpControls(dialog)
             End If
             On Error GoTo 0
             
-            For i = 0 To childCount - 1
-                On Error Resume Next
-                Dim child, typeName, textVal
-                Set child = node.Children.Item(i)
-                typeName = ""
-                textVal = ""
-                If Not (child Is Nothing) Then
-                    typeName = child.Type
-                    textVal = child.Text
-                End If
-                On Error GoTo 0
-                
-                If Not (child Is Nothing) Then
-                    WScript.Echo "  " & child.Id & " | " & typeName & " | " & textVal
+            If childCount > 0 Then
+                For i = 0 To childCount - 1
+                    On Error Resume Next
+                    Dim child, typeName, textVal
+                    Set child = node.Children.Item(i)
+                    typeName = ""
+                    textVal = ""
+                    If Not (child Is Nothing) Then
+                        typeName = child.Type
+                        textVal = child.Text
+                    End If
+                    On Error GoTo 0
                     
-                    ReDim Preserve stack(stackSize)
-                    Set stack(stackSize) = child
-                    stackSize = stackSize + 1
-                End If
-            Next
+                    If Not (child Is Nothing) Then
+                        WScript.Echo "  " & child.Id & " | " & typeName & " | " & textVal
+                        
+                        ReDim Preserve stack(stackSize)
+                        Set stack(stackSize) = child
+                        stackSize = stackSize + 1
+                    End If
+                Next
+            End If
         End If
     Loop
 End Sub
