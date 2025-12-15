@@ -364,8 +364,7 @@ Function ExportLocalFile(Session, OutputDir, CompanyCode, DateParts, DumpRadios,
                     Session.findById("wnd[1]/tbar[0]/btn[0]").press
                     WScript.Sleep 1000
                     If LooksLikeAsciiList(fullPathLocal) Then
-                        WScript.Echo "Warning: Local file export produced a text list; will fall back to XXL export."
-                        Exit Function
+                        WScript.Echo "Info: Local file export produced a text list (still usable by payment-list)."
                     End If
                     ExportLocalFile = True
                     Exit Function
@@ -377,11 +376,10 @@ Function ExportLocalFile(Session, OutputDir, CompanyCode, DateParts, DumpRadios,
     ' Fallback: some SAP setups open a Windows "Save As" dialog (not visible to SAP scripting).
     If TrySaveViaSendKeys(saveDir, fileName) Then
         If LooksLikeAsciiList(fullPathLocal) Then
-            WScript.Echo "Warning: Local file export produced a text list; will fall back to XXL export."
-        Else
-            ExportLocalFile = True
-            Exit Function
+            WScript.Echo "Info: Local file export produced a text list (still usable by payment-list)."
         End If
+        ExportLocalFile = True
+        Exit Function
     End If
 
     WScript.Echo "Error: Local file save dialog not found."
